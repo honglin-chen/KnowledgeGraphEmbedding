@@ -43,8 +43,10 @@ class KGEModel(nn.Module):
         self.entity_dim = hidden_dim*2 if double_entity_embedding else hidden_dim
         self.relation_dim = hidden_dim*2 if double_relation_embedding else hidden_dim
 
-        if model_name == 'tRotatE':
-            self.entity_dim *= 2
+        if model_name.endswith('tRotatE'):
+            self.n_tuple = int(model_name[0])
+            assert self.n_tuple in [2, 4]
+            self.entity_dim *= self.n_tuple
 
         self.entity_embedding = nn.Parameter(torch.zeros(nentity, self.entity_dim))
 
@@ -65,7 +67,7 @@ class KGEModel(nn.Module):
             self.modulus = nn.Parameter(torch.Tensor([[0.5 * self.embedding_range.item()]]))
         
         #Do not forget to modify this line when you add a new model in the "forward" function
-        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', 'tRotatE', 'pRotatE']:
+        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', '2tRotatE', '4tRotatE', 'pRotatE']:
             raise ValueError('model %s not supported' % model_name)
             
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -161,12 +163,13 @@ class KGEModel(nn.Module):
             'DistMult': self.DistMult,
             'ComplEx': self.ComplEx,
             'RotatE': self.RotatE,
-            'tRotatE': self.tRotatE,
             'pRotatE': self.pRotatE,
         }
         
         if self.model_name in model_func:
             score = model_func[self.model_name](head, relation, tail, mode)
+        elif self.model_name.endswith('tRotatE'):
+            score = self.tRotatE(head, relation, tail, mode)
         else:
             raise ValueError('model %s not supported' % self.model_name)
         
@@ -239,13 +242,17 @@ class KGEModel(nn.Module):
 
     def tRotatE(self, head, relation, tail, mode):
 
-        head_0, head_1 = torch.chunk(head, 2, dim=2)
-        tail_0, tail_1 = torch.chunk(tail, 2, dim=2)
+        heads = torch.chunk(head, self.n_tuple, dim=2)
+        tails = torch.chunk(tail, self.n_tuple, dim=2)
 
-        score_0 = self.RotatE(head_0, relation, tail_0, mode)
-        score_1 = self.RotatE(head_1, relation, tail_1, mode)
+        # sum the score for each element in the tuple
+        score = 0.
+        for i in range(self.n_tuple):
+            score += self.RotatE(heads[i], relation, tails[i], mode)
 
-        score = 0.5 * (score_0 + score_1)
+        # average the scores
+        score /= self.n_tuple
+
         return score
 
     def pRotatE(self, head, relation, tail, mode):
