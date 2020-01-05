@@ -169,7 +169,11 @@ def main(args):
 
     if args.do_train and args.save_path is None:
         raise ValueError('Where do you want to save your trained model?')
-    
+
+    # add save overwrite protection if FILE_ID > 0 (FILE_ID = -1 is used for debugging)
+    if os.path.exists(args.save_path) and not (args.save_path.split('_')[-1] == '-1'):
+        raise ValueError('Experiment folder already exist, exit to avoid content loss')
+
     if args.save_path and not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
     
