@@ -1,4 +1,4 @@
-**Results on wn18 **
+**Results on wn18**
 
 | Model | RotatE (reported) | RotatE (re-run) | 2-tuple RotatE | 4-tuple RotatE |
 |-------------|-------------|-------------|-------------|-------------|
