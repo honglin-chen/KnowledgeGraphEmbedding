@@ -44,12 +44,12 @@ class KGEModel(nn.Module):
         self.entity_dim = hidden_dim*2 if double_entity_embedding else hidden_dim
         self.relation_dim = hidden_dim*2 if double_relation_embedding else hidden_dim
 
-        if model_name.endswith('tRotatE'):
+        if model_name.endswith('tRotatE') or model_name.endswith('tRotationH'):
             self.n_tuple = int(model_name[0])
             assert self.n_tuple in [2, 4]
             self.entity_dim *= self.n_tuple
 
-        if model_name == 'RotationH':
+        if model_name.endswith('RotationH'):
             self.entity_dim += 1 # use the last column as entity bias
             self.curvature = nn.Parameter(torch.zeros(1, ))
             self.softplus = nn.Softplus()
@@ -75,7 +75,8 @@ class KGEModel(nn.Module):
             self.modulus = nn.Parameter(torch.Tensor([[0.5 * self.embedding_range.item()]]))
 
         #Do not forget to modify this line when you add a new model in the "forward" function
-        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', '2tRotatE', '4tRotatE', 'pRotatE', 'RotationH']:
+        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', '2tRotatE', '4tRotatE', 'pRotatE', \
+                              'RotationH', '2tRotationH', '4tRotationH']:
             raise ValueError('model %s not supported' % model_name)
 
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -180,6 +181,8 @@ class KGEModel(nn.Module):
             score = model_func[self.model_name](head, relation, tail, mode)
         elif self.model_name.endswith('tRotatE'):
             score = self.tRotatE(head, relation, tail, mode)
+        elif self.model_name.endswith('tRotationH'):
+            score = self.tRotationH(head, relation, tail, mode)
         else:
             raise ValueError('model %s not supported' % self.model_name)
         
@@ -286,12 +289,15 @@ class KGEModel(nn.Module):
         return score
 
     def RotationH(self, head, relation, tail, mode):
+        dim = head.shape[2] - 1
+        assert dim in [self.entity_dim, int(self.entity_dim/2), int(self.entity_dim/4)]
+
         if mode == 'head_batch':
-            head, bh = tail.split([self.entity_dim-1, 1], dim=2)
-            tail, bt = head.split([self.entity_dim-1, 1], dim=2)
+            head, bh = tail.split([dim, 1], dim=2)
+            tail, bt = head.split([dim, 1], dim=2)
         else:
-            head, bh = head.split([self.entity_dim-1, 1], dim=2)
-            tail, bt = tail.split([self.entity_dim-1, 1], dim=2)
+            head, bh = head.split([dim, 1], dim=2)
+            tail, bt = tail.split([dim, 1], dim=2)
 
         trans, phase = relation.split([self.relation_dim-self.phase_dim, self.phase_dim], dim=2)
         c = self.softplus(self.curvature)
@@ -324,7 +330,26 @@ class KGEModel(nn.Module):
         score = d ** 2 + bh + bt
 
         return score.squeeze(2)
-    
+
+    def tRotationH(self, head, relation, tail, mode):
+        head, bh = head.split([self.entity_dim - 1, 1], dim=2)
+        tail, bt = tail.split([self.entity_dim - 1, 1], dim=2)
+
+        heads = torch.chunk(head, self.n_tuple, dim=2)
+        tails = torch.chunk(tail, self.n_tuple, dim=2)
+
+        # sum the score for each element in the tuple
+        score = 0.
+        for i in range(self.n_tuple):
+            heads_i = torch.cat([heads[i], bh], dim=2)
+            tails_i = torch.cat([tails[i], bt], dim=2)
+            score += self.RotationH(heads_i, relation, tails_i, mode)
+
+        # average the scores
+        score /= self.n_tuple
+
+        return score
+
     @staticmethod
     def train_step(model, optimizer, train_iterator, args):
         '''
