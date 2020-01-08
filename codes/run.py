@@ -19,6 +19,7 @@ from model import KGEModel
 
 from dataloader import TrainDataset
 from dataloader import BidirectionalOneShotIterator
+import tensorboard_logger
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
@@ -57,12 +58,14 @@ def parse_args(args=None):
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
     parser.add_argument('-init', '--init_checkpoint', default=None, type=str)
     parser.add_argument('-save', '--save_path', default=None, type=str)
+    parser.add_argument('-tb', '--tb_path', default=None, type=str, help='path to tensorboard log dir')
     parser.add_argument('--max_steps', default=100000, type=int)
     parser.add_argument('--warm_up_steps', default=None, type=int)
     
     parser.add_argument('--save_checkpoint_steps', default=10000, type=int)
     parser.add_argument('--valid_steps', default=10000, type=int)
     parser.add_argument('--log_steps', default=100, type=int, help='train log every xx steps')
+    parser.add_argument('--tb_steps', default=2000, type=int, help='tensorboard train log every xx steps')
     parser.add_argument('--test_log_steps', default=1000, type=int, help='valid/test log every xx steps')
     
     parser.add_argument('--nentity', type=int, default=0, help='DO NOT MANUALLY SET')
@@ -156,7 +159,10 @@ def log_metrics(mode, step, metrics):
     '''
     for metric in metrics:
         logging.info('%s %s at step %d: %f' % (mode, metric, step, metrics[metric]))
-        
+
+def log_tensorboard(logger, step, metrics, prefix):
+    for metric in metrics:
+        logger.log_value('{}/{}'.format(prefix, metric), metrics[metric], step)
         
 def main(args):
     if (not args.do_train) and (not args.do_valid) and (not args.do_test):
@@ -209,9 +215,15 @@ def main(args):
     
     args.nentity = nentity
     args.nrelation = nrelation
+
+    # create tensorboard logger
+    tb_logger = tensorboard_logger.Logger(logdir=args.tb_path, flush_secs=2)
     
     logging.info('Model: %s' % args.model)
     logging.info('Data Path: %s' % args.data_path)
+    logging.info('Exp name: %s' % args.save_path.split('/')[1])
+
+    logging.info(' ')
     logging.info('#entity: %d' % nentity)
     logging.info('#relation: %d' % nrelation)
     
@@ -234,7 +246,7 @@ def main(args):
         double_entity_embedding=args.double_entity_embedding,
         double_relation_embedding=args.double_relation_embedding
     )
-    
+    logging.info(' ')
     logging.info('Model Parameter Configuration:')
     for name, param in kge_model.named_parameters():
         logging.info('Parameter %s: %s, require_grad = %s' % (name, str(param.size()), str(param.requires_grad)))
@@ -248,7 +260,7 @@ def main(args):
             TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch'), 
             batch_size=args.batch_size,
             shuffle=True, 
-            num_workers=max(1, args.cpu_num//2),
+            num_workers=max(1, args.cpu_num//4),
             collate_fn=TrainDataset.collate_fn
         )
         
@@ -256,7 +268,7 @@ def main(args):
             TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch'), 
             batch_size=args.batch_size,
             shuffle=True, 
-            num_workers=max(1, args.cpu_num//2),
+            num_workers=max(1, args.cpu_num//4),
             collate_fn=TrainDataset.collate_fn
         )
         
@@ -288,7 +300,7 @@ def main(args):
         init_step = 0
     
     step = init_step
-    
+    logging.info(' ')
     logging.info('Start Training...')
     logging.info('init_step = %d' % init_step)
     logging.info('batch_size = %d' % args.batch_size)
@@ -303,6 +315,7 @@ def main(args):
     
     if args.do_train:
         logging.info('learning_rate = %d' % current_learning_rate)
+        logging.info(' ')
 
         training_logs = []
         
@@ -329,18 +342,23 @@ def main(args):
                     'warm_up_steps': warm_up_steps
                 }
                 save_model(kge_model, optimizer, save_variable_list, args)
-                
+
             if step % args.log_steps == 0:
                 metrics = {}
                 for metric in training_logs[0].keys():
                     metrics[metric] = sum([log[metric] for log in training_logs])/len(training_logs)
                 log_metrics('Training average', step, metrics)
                 training_logs = []
-                
+
+            if step % args.tb_steps == 0:
+                log_tensorboard(tb_logger, step, metrics, 'train')
+
             if args.do_valid and step % args.valid_steps == 0:
                 logging.info('Evaluating on Valid Dataset...')
                 metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
                 log_metrics('Valid', step, metrics)
+                log_tensorboard(tb_logger, step, metrics, 'valid')
+
         
         save_variable_list = {
             'step': step, 

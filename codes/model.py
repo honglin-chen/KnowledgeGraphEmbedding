@@ -306,8 +306,8 @@ class KGEModel(nn.Module):
         h_trans = hyperbolic.expmap(trans, c)
 
         # rotate
-        pi = 3.14159265358979323846
-        phase = phase / (self.embedding_range.item() / pi)
+        # pi = 3.14159265358979323846
+        # phase = phase / (self.embedding_range.item() / pi)
 
         re_head, im_head = torch.chunk(h_head, 2, dim=2)
 
