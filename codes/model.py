@@ -290,7 +290,6 @@ class KGEModel(nn.Module):
 
     def RotationH(self, head, relation, tail, mode):
         dim = head.shape[2] - 1
-        assert dim in [self.entity_dim, int(self.entity_dim/2), int(self.entity_dim/4)]
 
         if mode == 'head_batch':
             head, bh = tail.split([dim, 1], dim=2)
