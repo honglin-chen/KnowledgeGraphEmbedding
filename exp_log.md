@@ -23,7 +23,7 @@
 
 **Hyperbolicity of WN**
 
-| relation | # nodes | # edgea | hyperbolicity |
+| relation | # nodes | # edges | hyperbolicity |
 |-------------|-------------|-------------|-------------|
 |  0  |   3454  |   3340  | 4  |
 |  1  |   5444  |   5142  | 2  |
