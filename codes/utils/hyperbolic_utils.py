@@ -4,13 +4,12 @@ import torch
 MIN_NORM = 1e-15
 
 
-def expmap(v, c):
+def expmap0(v, c):
     """ Defining all the parameters in the Euclidean tangent space at the origin """
     v_norm = v.norm(dim=-1, p=2, keepdim=True).clamp_min(MIN_NORM)
     prod = c ** 0.5 * v_norm
     y = math.tanh(prod) * v / prod.clamp_min(MIN_NORM)
-    origin = torch.zeros_like(y)
-    return mobius_add(origin, y, c)
+    return y
 
 
 def mobius_add(x, y, c, dim=-1):
@@ -23,7 +22,7 @@ def mobius_add(x, y, c, dim=-1):
 
 
 def dist(x, y, c):
-    xy = - mobius_add(x, y, c)
+    xy = mobius_add(-x, y, c)
     norm = xy.norm(dim=-1, p=2, keepdim=True)
     c_sqrt = c ** 0.5
     return 2 * math.artanh(c_sqrt * norm) / c_sqrt

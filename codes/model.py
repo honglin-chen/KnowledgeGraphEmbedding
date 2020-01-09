@@ -49,12 +49,14 @@ class KGEModel(nn.Module):
             assert self.n_tuple in [2, 4]
             self.entity_dim *= self.n_tuple
 
-        if model_name.endswith('RotationH'):
+        if model_name.endswith('RotationH') or model_name.endswith('LinearTransH'):
             self.entity_dim += 1 # use the last column as entity bias
             self.curvature = nn.Parameter(torch.zeros(1, ))
             self.softplus = nn.Softplus()
             if not self.relation_dim % 2 == 0: raise ValueError('dim must be even')
             self.phase_dim = int(self.relation_dim / 2)
+            if model_name.endswith('LinearTransH'):
+                self.phase_dim *= 4 # 2x2 linear transformation
             self.relation_dim += self.phase_dim #  add phases dim for hyperbolic rotation
 
         self.entity_embedding = nn.Parameter(torch.zeros(nentity, self.entity_dim))
@@ -76,7 +78,7 @@ class KGEModel(nn.Module):
 
         #Do not forget to modify this line when you add a new model in the "forward" function
         if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', '2tRotatE', '4tRotatE', 'pRotatE', \
-                              'RotationH', '2tRotationH', '4tRotationH']:
+                              'RotationH', '2tRotationH', '4tRotationH', 'LinearTransH']:
             raise ValueError('model %s not supported' % model_name)
 
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -174,7 +176,8 @@ class KGEModel(nn.Module):
             'ComplEx': self.ComplEx,
             'RotatE': self.RotatE,
             'pRotatE': self.pRotatE,
-            'RotationH': self.RotationH
+            'RotationH': self.RotationH,
+            'LinearTransH': self.LinearTransH,
         }
         
         if self.model_name in model_func:
@@ -301,13 +304,13 @@ class KGEModel(nn.Module):
         trans, phase = relation.split([self.relation_dim-self.phase_dim, self.phase_dim], dim=2)
         c = self.softplus(self.curvature)
 
-        h_head = hyperbolic.expmap(head, c)
-        h_tail = hyperbolic.expmap(tail, c)
-        h_trans = hyperbolic.expmap(trans, c)
+        h_head = hyperbolic.expmap0(head, c)
+        h_tail = hyperbolic.expmap0(tail, c)
+        h_trans = hyperbolic.expmap0(trans, c)
 
         # rotate
-        # pi = 3.14159265358979323846
-        # phase = phase / (self.embedding_range.item() / pi)
+        pi = 3.14159265358979323846
+        phase = phase / (self.embedding_range.item() / pi)
 
         re_head, im_head = torch.chunk(h_head, 2, dim=2)
 
@@ -329,6 +332,45 @@ class KGEModel(nn.Module):
         score = d ** 2 + bh + bt
 
         return score.squeeze(2)
+
+    def LinearTransH(self, head, relation, tail, mode):
+
+        dim = head.shape[2] - 1
+
+        if mode == 'head_batch':
+            head, bh = tail.split([dim, 1], dim=2)
+            tail, bt = head.split([dim, 1], dim=2)
+        else:
+            head, bh = head.split([dim, 1], dim=2)
+            tail, bt = tail.split([dim, 1], dim=2)
+
+        translate, transform = relation.split([self.relation_dim - self.phase_dim, self.phase_dim], dim=2)
+        c = self.softplus(self.curvature)
+
+        h_head = hyperbolic.expmap0(head, c)
+        h_tail = hyperbolic.expmap0(tail, c)
+        h_translate = hyperbolic.expmap0(translate, c)
+
+        # linear transformation
+        transform = transform.view(transform.shape[0], transform.shape[1], -1, 4)
+        re_head, im_head = torch.chunk(h_head, 2, dim=2)
+
+        re_rot = transform[..., 0] * re_head + transform[..., 1] * im_head
+        im_rot = transform[..., 2] * im_head + transform[..., 3] * re_head
+
+        x = torch.cat([re_rot, im_rot], dim=-1)
+
+        # translate
+        x = hyperbolic.mobius_add(x, h_translate, c)
+
+        # distance
+        d = hyperbolic.dist(x, h_tail, c)
+
+        # add entity bias
+        score = d ** 2 + bh + bt
+
+        return score.squeeze(2)
+
 
     def tRotationH(self, head, relation, tail, mode):
         head, bh = head.split([self.entity_dim - 1, 1], dim=2)
