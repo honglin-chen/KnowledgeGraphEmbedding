@@ -21,7 +21,7 @@
 
 
 
-**Hyperbolicity of WN**
+**Hyperbolicity of WN18**
 
 | relation | # nodes | # edges | hyperbolicity |
 |-------------|-------------|-------------|-------------|
