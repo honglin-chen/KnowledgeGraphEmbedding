@@ -49,6 +49,9 @@ class KGEModel(nn.Module):
             assert self.n_tuple in [2, 4]
             self.entity_dim *= self.n_tuple
 
+        if model_name == 'LinearTransE':
+            self.relation_dim *= 4
+
         if model_name.endswith('RotationH') or model_name.endswith('LinearTransH'):
             self.entity_dim += 1 # use the last column as entity bias
             self.curvature = nn.Parameter(torch.zeros(1, ))
@@ -72,13 +75,17 @@ class KGEModel(nn.Module):
             a=-self.embedding_range.item(), 
             b=self.embedding_range.item()
         )
+
+        if model_name == 'LinearTransE':
+            print('Warning: Using xavier uniform init for relation embedding')
+            nn.init.xavier_uniform_(self.relation_embedding)
         
         if model_name == 'pRotatE':
             self.modulus = nn.Parameter(torch.Tensor([[0.5 * self.embedding_range.item()]]))
 
         #Do not forget to modify this line when you add a new model in the "forward" function
         if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', '2tRotatE', '4tRotatE', 'pRotatE', \
-                              'RotationH', '2tRotationH', '4tRotationH', 'LinearTransH']:
+                              'RotationH', '2tRotationH', '4tRotationH', 'LinearTransE']:
             raise ValueError('model %s not supported' % model_name)
 
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -177,7 +184,7 @@ class KGEModel(nn.Module):
             'RotatE': self.RotatE,
             'pRotatE': self.pRotatE,
             'RotationH': self.RotationH,
-            'LinearTransH': self.LinearTransH,
+            'LinearTransE': self.LinearTransE,
         }
         
         if self.model_name in model_func:
@@ -254,6 +261,43 @@ class KGEModel(nn.Module):
         score = score.norm(dim = 0)
 
         score = self.gamma.item() - score.sum(dim = 2)
+        return score
+
+    def LinearTransE(self, head, relation, tail, mode):
+
+        re_head, im_head = torch.chunk(head, 2, dim=2)
+        re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+
+        relation = relation.reshape(relation.shape[0], relation.shape[1], re_head.shape[2], 4)
+
+        # normalize matrix (frobenius norm)
+        # norm = relation.norm(dim=-1).unsqueeze(3)
+        # relation = relation / norm
+
+        # normalize matrix (column norm)
+        # norm_1 = relation[..., [0, 2]].norm(dim=-1).unsqueeze(3)
+        # norm_2 = relation[..., [1, 3]].norm(dim=-1).unsqueeze(3)
+        # relation[..., [0, 2]] = relation[..., [0, 2]] / norm_1
+        # relation[..., [1, 3]] = relation[..., [1, 3]] / norm_2
+
+        a, b, c, d = relation[..., 0], relation[..., 1], relation[..., 2], relation[..., 3]
+
+        if mode == 'head-batch':
+            det = 1 / ((a * d - b * c) + 1e-15)
+            re_score = det * (d * re_tail - b * im_tail)
+            im_score = det * (a * im_tail - c * re_tail)
+            re_score = re_score - re_head
+            im_score = im_score - im_head
+        else:
+            re_score = re_head * a + im_head * b
+            im_score = re_head * c + im_head * d
+            re_score = re_score - re_tail
+            im_score = im_score - im_tail
+
+        score = torch.stack([re_score, im_score], dim=0)
+        score = score.norm(dim=0)
+
+        score = self.gamma.item() - score.sum(dim=2)
         return score
 
     def tRotatE(self, head, relation, tail, mode):

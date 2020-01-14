@@ -3,7 +3,10 @@ import numpy as np
 import os
 import pickle as pkl
 import time
+import pdb
 # import utils.data_utils as data_utils
+import data_utils
+
 
 def hyperbolicity_sample(G):
     curr_time = time.time()
@@ -32,12 +35,14 @@ def hyperbolicity_sample(G):
             s.append(d02 + d13)
             s.append(d03 + d12)
             s.sort()
-            hyps.append((s[-1] - s[-2]) / 2)
+            hyps.append((s[-1] - s[-2]) / 2.)
+            # print((s[-1] - s[-2]) / 2.)
         except Exception as e:
             continue
     #print('Time for hyp: ', time.time() - curr_time)
     try:
         return max(hyps)
+
     except:
         return -1
 
@@ -67,6 +72,24 @@ def hyp_syn():
     hyp = hyperbolicity_sample(graph)
     print('Hyp: ', hyp)
 
+def hyp_cora():
+    data_path = './data/cora'
+    dataset_str = 'cora'
+    output = data_utils.load_citation_data(dataset_str, False, data_path)
+    adj = output[0]
+    graph = nx.from_scipy_sparse_matrix(adj)
+    print('Computing hyperbolicity', graph.number_of_nodes(), graph.number_of_edges())
+    # hyp = hyperbolicity_sample(graph)
+
+    pdb.set_trace()
+
+
+
+
+
+    print('Hyp: ', hyp)
+
+
 def read_triple(file_path, entity2id, relation2id):
     '''
     Read triples and map them into ids.
@@ -77,23 +100,48 @@ def read_triple(file_path, entity2id, relation2id):
             h, r, t = line.strip().split('\t')
             triples.append((entity2id[h], relation2id[r], entity2id[t]))
     return triples
-def hyp_wn18():
-    with open(os.path.join('./data/wn18', 'entities.dict')) as fin:
+
+
+def hyp_general(dataset='wn18'):
+    print('dataset: %s' % dataset)
+    data_dir = './data/%s' % dataset
+    with open(os.path.join(data_dir, 'entities.dict')) as fin:
         entity2id = dict()
         for line in fin:
             eid, entity = line.strip().split('\t')
             entity2id[entity] = int(eid)
 
-    with open(os.path.join('./data/wn18', 'relations.dict')) as fin:
+    with open(os.path.join(data_dir, 'relations.dict')) as fin:
         relation2id = dict()
         for line in fin:
             rid, relation = line.strip().split('\t')
             relation2id[relation] = int(rid)
-    train_triples = read_triple(os.path.join('./data/wn18', 'train.txt'), entity2id, relation2id)
-    valid_triples = read_triple(os.path.join('./data/wn18', 'valid.txt'), entity2id, relation2id)
-    test_triples = read_triple(os.path.join('./data/wn18', 'test.txt'), entity2id, relation2id)
+    train_triples = read_triple(os.path.join(data_dir, 'train.txt'), entity2id, relation2id)
+    valid_triples = read_triple(os.path.join(data_dir, 'valid.txt'), entity2id, relation2id)
+    test_triples = read_triple(os.path.join(data_dir, 'test.txt'), entity2id, relation2id)
     all_true_triples = train_triples + valid_triples + test_triples
+    print(len(all_true_triples))
 
+    from sage.graphs.hyperbolicity import hyperbolicity
+    G = Graph(loops=True)
+    pdb.set_trace()
+    for i in all_true_triples: G.add_edge(i)
+    hyperbolicity(G)
+
+    # # entire graph
+    # G = nx.Graph()
+    # node_set = []
+    # for triple in all_true_triples:
+    #     node_set.append(triple[0])
+    #     node_set.append(triple[2])
+    #     G.add_edge(triple[0], triple[2])
+    # node_set = set(node_set)
+    # for i in set(node_set):
+    #     G.add_node(i)
+    #
+    # hyp = hyperbolicity_sample(G)
+    # print('| entire G |  %5d  |  %5d  | %d  |' % (G.number_of_nodes(), G.number_of_edges(), hyp))
+    #
     # for relation in range(0, 18):
     #
     #     # print('------- %d --------' % relation)
@@ -102,7 +150,7 @@ def hyp_wn18():
     #     for triple in all_true_triples:
     #         if triple[1] == relation:
     #             node_set.append(triple[0])
-    #             node_set.append(triple[1])
+    #             node_set.append(triple[2])
     #
     #             G.add_edge(triple[0], triple[2])
     #     for i in set(node_set):
@@ -110,23 +158,11 @@ def hyp_wn18():
     #     hyp = hyperbolicity_sample(G)
     #     print('|  %d  |  %5d  |  %5d  | %d  |' %(relation, G.number_of_nodes(), G.number_of_edges(), hyp))
 
-    # entire graph
-    G = nx.Graph()
-    node_set = []
-    for triple in all_true_triples:
-        node_set.append(triple[0])
-        node_set.append(triple[1])
 
-        G.add_edge(triple[0], triple[2])
-    for i in set(node_set):
-        G.add_node(i)
-
-    hyp = hyperbolicity_sample(G)
-    print('|  %5d  |  %5d  | %d  |' %(G.number_of_nodes(), G.number_of_edges(), hyp))
 
 if __name__ == '__main__':
     #hyp_airport()
     # hyp_syn()
     #hyp_ppi()
-    hyp_wn18()
-
+    hyp_general('wn18')
+    # hyp_cora()
