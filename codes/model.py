@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from dataloader import TestDataset
 import pdb
 import utils.hyperbolic_utils as hyperbolic
+from termcolor import colored
 
 
 class KGEModel(nn.Module):
@@ -50,9 +51,21 @@ class KGEModel(nn.Module):
             self.entity_dim *= self.n_tuple
 
         if model_name == 'LinearTransE':
-            self.relation_dim *= 4
+            self.relation_dim *= 2
+
+        if model_name in ['RotatH', 'RotatTransH']:
+            self.curvature = nn.Parameter(torch.zeros(1, ))
+            self.softplus = nn.Softplus()
+            self.entity_dim += 1  # use the last column as entity bias
+            if model_name == 'RotatTransH':
+                self.relation_dim += (self.entity_dim-1)
+
+        if model_name == 'RotatTransE':
+            self.relation_dim += self.entity_dim
+
 
         if model_name.endswith('RotationH') or model_name.endswith('LinearTransH'):
+            # deprecated
             self.entity_dim += 1 # use the last column as entity bias
             self.curvature = nn.Parameter(torch.zeros(1, ))
             self.softplus = nn.Softplus()
@@ -77,15 +90,17 @@ class KGEModel(nn.Module):
         )
 
         if model_name == 'LinearTransE':
-            print('Warning: Using xavier uniform init for relation embedding')
-            nn.init.xavier_uniform_(self.relation_embedding)
-        
+            # print('Warning: Using xavier uniform init for relation embedding')
+            # nn.init.xavier_uniform_(self.relation_embedding)
+            print(colored('!! Warning: initiaze 1st part of relation embedding to be 1 !!', 'red'))
+            nn.init.ones_(self.relation_embedding[..., 0:int(self.relation_dim/2.0)])
+
         if model_name == 'pRotatE':
             self.modulus = nn.Parameter(torch.Tensor([[0.5 * self.embedding_range.item()]]))
 
         #Do not forget to modify this line when you add a new model in the "forward" function
         if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', '2tRotatE', '4tRotatE', 'pRotatE', \
-                              'RotationH', '2tRotationH', '4tRotationH', 'LinearTransE']:
+                              'RotationH', '2tRotationH', '4tRotationH', 'LinearTransE', 'RotatH', 'RotatTransH', 'RotatTransE']:
             raise ValueError('model %s not supported' % model_name)
 
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -182,6 +197,9 @@ class KGEModel(nn.Module):
             'DistMult': self.DistMult,
             'ComplEx': self.ComplEx,
             'RotatE': self.RotatE,
+            'RotatTransE': self.RotatE,
+            'RotatH': self.RotatH,
+            'RotatTransH': self.RotatH,
             'pRotatE': self.pRotatE,
             'RotationH': self.RotationH,
             'LinearTransE': self.LinearTransE,
@@ -240,8 +258,12 @@ class KGEModel(nn.Module):
         re_tail, im_tail = torch.chunk(tail, 2, dim=2)
 
         #Make phases of relations uniformly distributed in [-pi, pi]
-
-        phase_relation = relation/(self.embedding_range.item()/pi)
+        if self.model_name == 'RotatTransE':
+            phase_relation, translation = relation.split([int(self.entity_dim / 2.), self.entity_dim], dim=2)
+            phase_relation = phase_relation / (self.embedding_range.item() / pi)
+            re_trans, im_trans = torch.chunk(translation, 2, dim=2)
+        else:
+            phase_relation = relation/(self.embedding_range.item()/pi)
 
         re_relation = torch.cos(phase_relation)
         im_relation = torch.sin(phase_relation)
@@ -257,18 +279,73 @@ class KGEModel(nn.Module):
             re_score = re_score - re_tail
             im_score = im_score - im_tail
 
+        if self.model_name == 'RotatTransE':
+            re_score += re_trans
+            im_score += im_trans
+
         score = torch.stack([re_score, im_score], dim = 0)
         score = score.norm(dim = 0)
 
         score = self.gamma.item() - score.sum(dim = 2)
         return score
 
-    def LinearTransE(self, head, relation, tail, mode):
+    def RotatH(self, head, relation, tail, mode):
+        pi = 3.14159265358979323846
+
+        head, bh = head.split([self.entity_dim - 1, 1], dim=2)
+        tail, bt = tail.split([self.entity_dim - 1, 1], dim=2)
+        bh = bh.squeeze(2)
+        bt = bt.squeeze(2)
+
+        # project to hyperbolic manifold
+        c = self.softplus(self.curvature)
+        head = hyperbolic.proj(hyperbolic.expmap0(hyperbolic.proj_tan0(head, c), c=c), c=c)
+        tail = hyperbolic.proj(hyperbolic.expmap0(hyperbolic.proj_tan0(tail, c), c=c), c=c)
 
         re_head, im_head = torch.chunk(head, 2, dim=2)
         re_tail, im_tail = torch.chunk(tail, 2, dim=2)
 
-        relation = relation.reshape(relation.shape[0], relation.shape[1], re_head.shape[2], 4)
+        # Make phases of relations uniformly distributed in [-pi, pi]
+        if self.model_name == 'RotatTransH':
+            phase_relation, translation = relation.split([int((self.entity_dim-1)/2.), self.entity_dim-1], dim=2)
+            phase_relation = phase_relation / (self.embedding_range.item() / pi)
+            translation = hyperbolic.proj(hyperbolic.expmap0(hyperbolic.proj_tan0(translation, c), c=c), c=c)
+        else:
+            phase_relation = relation / (self.embedding_range.item() / pi)
+
+        re_relation = torch.cos(phase_relation)
+        im_relation = torch.sin(phase_relation)
+
+        if mode == 'head-batch':
+            re_score = re_relation * re_tail + im_relation * im_tail
+            im_score = re_relation * im_tail - im_relation * re_tail
+        else:
+            re_score = re_head * re_relation - im_head * im_relation
+            im_score = re_head * im_relation + im_head * re_relation
+
+        res = torch.cat([re_score, im_score], dim=2)
+
+        if self.model_name == 'RotatTransH':
+            res = hyperbolic.mobius_add(res, translation, c)
+
+        score = hyperbolic.sqdist(res, tail, c)
+        score = bh + bt - score
+        return score
+
+    def LinearTransE(self, head, relation, tail, mode):
+        pi = 3.14159265358979323846
+        re_head, im_head = torch.chunk(head, 2, dim=2)
+        re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+
+        # relation = relation.reshape(relation.shape[0], relation.shape[1], re_head.shape[2], 2)
+
+        # scale rotateE
+        scale, phase = torch.chunk(relation, 2, dim=2)
+        phase_relation = phase / (self.embedding_range.item() / pi)
+        a = torch.cos(phase_relation) * scale
+        b = - torch.sin(phase_relation) * scale
+        d = a
+        c = -b
 
         # normalize matrix (frobenius norm)
         # norm = relation.norm(dim=-1).unsqueeze(3)
@@ -280,7 +357,12 @@ class KGEModel(nn.Module):
         # relation[..., [0, 2]] = relation[..., [0, 2]] / norm_1
         # relation[..., [1, 3]] = relation[..., [1, 3]] / norm_2
 
-        a, b, c, d = relation[..., 0], relation[..., 1], relation[..., 2], relation[..., 3]
+        # a, b, c, d = relation[..., 0], relation[..., 1], relation[..., 2], relation[..., 3]
+
+        # conformal constraint
+        # a, b = relation[..., 0], relation[..., 1]
+        # d = a
+        # c = -b
 
         if mode == 'head-batch':
             det = 1 / ((a * d - b * c) + 1e-15)
@@ -336,6 +418,7 @@ class KGEModel(nn.Module):
         return score
 
     def RotationH(self, head, relation, tail, mode):
+        raise ValueError('This version has to be fixed')
         dim = head.shape[2] - 1
 
         if mode == 'head_batch':
