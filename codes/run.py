@@ -61,6 +61,7 @@ def parse_args(args=None):
     parser.add_argument('-tb', '--tb_path', default=None, type=str, help='path to tensorboard log dir')
     parser.add_argument('--max_steps', default=100000, type=int)
     parser.add_argument('--warm_up_steps', default=None, type=int)
+
     
     parser.add_argument('--save_checkpoint_steps', default=10000, type=int)
     parser.add_argument('--valid_steps', default=10000, type=int)
@@ -325,15 +326,16 @@ def main(args):
             log = kge_model.train_step(kge_model, optimizer, train_iterator, args)
             
             training_logs.append(log)
-            
+
             if step >= warm_up_steps:
-                current_learning_rate = current_learning_rate / 10
+                current_learning_rate = current_learning_rate / 10.
                 logging.info('Change learning_rate to %f at step %d' % (current_learning_rate, step))
                 optimizer = torch.optim.Adam(
-                    filter(lambda p: p.requires_grad, kge_model.parameters()), 
+                    filter(lambda p: p.requires_grad, kge_model.parameters()),
                     lr=current_learning_rate
                 )
                 warm_up_steps = warm_up_steps * 3
+
             
             if step % args.save_checkpoint_steps == 0:
                 save_variable_list = {

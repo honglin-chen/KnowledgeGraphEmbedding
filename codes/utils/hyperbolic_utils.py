@@ -12,6 +12,12 @@ def proj(x, c):
     projected = x / norm * maxnorm
     return torch.where(cond, projected, x)
 
+    # norm = torch.clamp_min(x.norm(dim=-1, keepdim=True, p=2), MIN_NORM)
+    # cond = norm >= 1
+    # projected = x / (norm - 1e-5)
+    # return torch.where(cond, projected, x)
+
+
 
 def proj_tan(u, p, c):
     return u

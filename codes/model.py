@@ -299,8 +299,9 @@ class KGEModel(nn.Module):
 
         # project to hyperbolic manifold
         c = self.softplus(self.curvature)
-        head = hyperbolic.proj(hyperbolic.expmap0(hyperbolic.proj_tan0(head, c), c=c), c=c)
-        tail = hyperbolic.proj(hyperbolic.expmap0(hyperbolic.proj_tan0(tail, c), c=c), c=c)
+
+        head = hyperbolic.proj(hyperbolic.expmap0(head, c), c=c)
+        tail = hyperbolic.proj(hyperbolic.expmap0(tail, c), c=c)
 
         re_head, im_head = torch.chunk(head, 2, dim=2)
         re_tail, im_tail = torch.chunk(tail, 2, dim=2)
@@ -309,7 +310,7 @@ class KGEModel(nn.Module):
         if self.model_name == 'RotatTransH':
             phase_relation, translation = relation.split([int((self.entity_dim-1)/2.), self.entity_dim-1], dim=2)
             phase_relation = phase_relation / (self.embedding_range.item() / pi)
-            translation = hyperbolic.proj(hyperbolic.expmap0(hyperbolic.proj_tan0(translation, c), c=c), c=c)
+            translation = hyperbolic.proj(hyperbolic.expmap0(translation, c), c=c)
         else:
             phase_relation = relation / (self.embedding_range.item() / pi)
 
@@ -319,17 +320,30 @@ class KGEModel(nn.Module):
         if mode == 'head-batch':
             re_score = re_relation * re_tail + im_relation * im_tail
             im_score = re_relation * im_tail - im_relation * re_tail
+
+            res = torch.cat([re_score, im_score], dim=2)
+
+            if self.model_name == 'RotatTransH':
+                res = hyperbolic.proj(res, c=c)
+                res = hyperbolic.mobius_add(res, -translation, c)
+
+            score = hyperbolic.sqdist(res, head, c)
+
         else:
             re_score = re_head * re_relation - im_head * im_relation
             im_score = re_head * im_relation + im_head * re_relation
 
-        res = torch.cat([re_score, im_score], dim=2)
+            res = torch.cat([re_score, im_score], dim=2)
 
-        if self.model_name == 'RotatTransH':
-            res = hyperbolic.mobius_add(res, translation, c)
+            if self.model_name == 'RotatTransH':
+                res = hyperbolic.proj(res, c=c)
+                res = hyperbolic.mobius_add(res, translation, c)
 
-        score = hyperbolic.sqdist(res, tail, c)
+            score = hyperbolic.sqdist(res, tail, c)
+
         score = bh + bt - score
+        # print(mode, head.shape, torch.mean(score).item())
+
         return score
 
     def LinearTransE(self, head, relation, tail, mode):
@@ -539,7 +553,7 @@ class KGEModel(nn.Module):
 
         if args.negative_adversarial_sampling:
             #In self-adversarial sampling, we do not apply back-propagation on the sampling weight
-            negative_score = (F.softmax(negative_score * args.adversarial_temperature, dim = 1).detach() 
+            negative_score = (F.softmax(negative_score * args.adversarial_temperature, dim = 1).detach()
                               * F.logsigmoid(-negative_score)).sum(dim = 1)
         else:
             negative_score = F.logsigmoid(-negative_score).mean(dim = 1)
@@ -547,6 +561,7 @@ class KGEModel(nn.Module):
         positive_score = model(positive_sample)
 
         positive_score = F.logsigmoid(positive_score).squeeze(dim = 1)
+
 
         if args.uni_weight:
             positive_sample_loss = - positive_score.mean()
@@ -556,18 +571,18 @@ class KGEModel(nn.Module):
             negative_sample_loss = - (subsampling_weight * negative_score).sum()/subsampling_weight.sum()
 
         loss = (positive_sample_loss + negative_sample_loss)/2
-        
+
         if args.regularization != 0.0:
             #Use L3 regularization for ComplEx and DistMult
             regularization = args.regularization * (
-                model.entity_embedding.norm(p = 3)**3 + 
+                model.entity_embedding.norm(p = 3)**3 +
                 model.relation_embedding.norm(p = 3).norm(p = 3)**3
             )
             loss = loss + regularization
             regularization_log = {'regularization': regularization.item()}
         else:
             regularization_log = {}
-            
+
         loss.backward()
 
         optimizer.step()
@@ -580,7 +595,7 @@ class KGEModel(nn.Module):
         }
 
         return log
-    
+
     @staticmethod
     def test_step(model, test_triples, all_true_triples, args):
         '''
