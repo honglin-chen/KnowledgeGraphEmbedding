@@ -50,12 +50,14 @@
 
 **Link prediction results by relation categories on FB15k**
 ***Prediction Head (Hits@3)***
+
 | Methods | 1-to-1 | 1-to-N | N-to-1 | N-to-N |
 |-------------|-------------|-------------|-------------|-------------|
 | TransE | 43.7 | 65.7 | 18.2 | 47.2 |
 |  RotatE | 91.8 | 97.0 | 72.2 | 88.6 |
  
  ***Prediction Tail (Hits@3)***
+ 
 | Methods | 1-to-1 | 1-to-N | N-to-1 | N-to-N |
 |-------------|-------------|-------------|-------------|-------------|
 | TransE | 43.7 | 19.7 | 66.7 | 50.0 | 
@@ -64,13 +66,15 @@
  
  **Link prediction results by relation categories on WN18**
 ***Prediction Head (Hits@3)***
+
 | Methods | 1-to-1 | 1-to-N | N-to-1 | N-to-N |
 |-------------|-------------|-------------|-------------|-------------|
 | RotatE | 95.6 | 96.9 | 95.6 | - | 
 
  ***Prediction Tail (Hits@3)***
+ 
 | Methods | 1-to-1 | 1-to-N | N-to-1 | N-to-N |
 |-------------|-------------|-------------|-------------|-------------|
-| RotatE | 95.2 | 95.0 | 97.3 - |
+| RotatE | 95.2 | 95.0 | 97.3 | - |
  
  
