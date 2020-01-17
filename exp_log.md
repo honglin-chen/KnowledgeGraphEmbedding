@@ -49,6 +49,7 @@
 
 
 **Link prediction results by relation categories on FB15k**
+
 ***Prediction Head (Hits@3)***
 
 | Methods | 1-to-1 | 1-to-N | N-to-1 | N-to-N |
@@ -65,6 +66,7 @@
  
  
  **Link prediction results by relation categories on WN18**
+ 
 ***Prediction Head (Hits@3)***
 
 | Methods | 1-to-1 | 1-to-N | N-to-1 | N-to-N |
