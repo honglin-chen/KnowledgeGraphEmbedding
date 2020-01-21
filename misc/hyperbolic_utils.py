@@ -18,6 +18,7 @@ def proj(x, c):
     return torch.where(cond, projected, x)
 
 
+
 def proj_tan(u, p, c):
     return u
 

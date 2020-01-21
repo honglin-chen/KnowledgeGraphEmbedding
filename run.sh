@@ -53,10 +53,17 @@ then
 echo "Start Evaluation on Valid Data Set......"
 
 CUDA_VISIBLE_DEVICES=$GPU_DEVICE python -u $CODE_PATH/run.py --do_valid --cuda -init $SAVE
-    
-elif [ $MODE == "test" ]
+
+
+elif [ $MODE == "category" ]
 then
 
+echo "Start Evaluation on Test Data Set with relation category......"
+
+CUDA_VISIBLE_DEVICES=$GPU_DEVICE python -u $CODE_PATH/run.py --do_test_relation_category --cuda -init $SAVE
+
+elif [ $MODE == "test" ]
+then
 echo "Start Evaluation on Test Data Set......"
 
 CUDA_VISIBLE_DEVICES=$GPU_DEVICE python -u $CODE_PATH/run.py --do_test --cuda -init $SAVE

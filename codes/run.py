@@ -32,6 +32,7 @@ def parse_args(args=None):
     parser.add_argument('--do_train', action='store_true')
     parser.add_argument('--do_valid', action='store_true')
     parser.add_argument('--do_test', action='store_true')
+    parser.add_argument('-dtc', '--do_test_relation_category', action='store_true')
     parser.add_argument('--evaluate_train', action='store_true', help='Evaluate on training data')
     
     parser.add_argument('--countries', action='store_true', help='Use Countries S1/S2/S3 datasets')
@@ -57,10 +58,12 @@ def parse_args(args=None):
     parser.add_argument('-lr', '--learning_rate', default=0.0001, type=float)
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
     parser.add_argument('-init', '--init_checkpoint', default=None, type=str)
+    parser.add_argument('-ckpt', '--checkpoint_name', default=None, type=str)
     parser.add_argument('-save', '--save_path', default=None, type=str)
     parser.add_argument('-tb', '--tb_path', default=None, type=str, help='path to tensorboard log dir')
     parser.add_argument('--max_steps', default=100000, type=int)
-    parser.add_argument('--warm_up_steps', default=None, type=int)
+    parser.add_argument('--lr_decay_epoch', default=None, type=int)
+    parser.add_argument('--lr_decay_rate', default=0.1, type=float)
 
     
     parser.add_argument('--save_checkpoint_steps', default=10000, type=int)
@@ -91,7 +94,7 @@ def override_config(args):
     args.hidden_dim = argparse_dict['hidden_dim']
     args.test_batch_size = argparse_dict['test_batch_size']
     
-def save_model(model, optimizer, save_variable_list, args):
+def save_model(model, optimizer, save_variable_list, args, step):
     '''
     Save the parameters of the model and the optimizer,
     as well as some other variables such as step and learning_rate
@@ -101,11 +104,14 @@ def save_model(model, optimizer, save_variable_list, args):
     with open(os.path.join(args.save_path, 'config.json'), 'w') as fjson:
         json.dump(argparse_dict, fjson)
 
+    if not os.path.exists(os.path.join(args.save_path, 'checkpoint')):
+        os.mkdir(os.path.join(args.save_path, 'checkpoint'))
+
     torch.save({
         **save_variable_list,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict()},
-        os.path.join(args.save_path, 'checkpoint')
+        os.path.join(args.save_path, 'checkpoint', 'ckpt_%d' % step)
     )
     
     entity_embedding = model.entity_embedding.detach().cpu().numpy()
@@ -166,7 +172,7 @@ def log_tensorboard(logger, step, metrics, prefix):
         logger.log_value('{}/{}'.format(prefix, metric), metrics[metric], step)
         
 def main(args):
-    if (not args.do_train) and (not args.do_valid) and (not args.do_test):
+    if (not args.do_train) and (not args.do_valid) and (not args.do_test) and not (args.do_test_relation_category):
         raise ValueError('one of train/val/test mode must be choosed.')
     
     if args.init_checkpoint:
@@ -201,6 +207,15 @@ def main(args):
         for line in fin:
             rid, relation = line.strip().split('\t')
             relation2id[relation] = int(rid)
+
+    if args.do_test_relation_category:
+        rid2cid = dict()
+        category2id = {'1-1': 0, '1-M': 1, 'M-1': 2, 'M-M': 3, 'None': -1}
+
+        with open(os.path.join(args.data_path, 'relation_category.txt')) as fin:
+            for line in fin:
+                relation, category = line.strip().split('\t')
+                rid2cid[relation2id[relation]] = category2id[category]
     
     # Read regions for Countries S* datasets
     if args.countries:
@@ -211,6 +226,7 @@ def main(args):
                 regions.append(entity2id[region])
         args.regions = regions
 
+
     nentity = len(entity2id)
     nrelation = len(relation2id)
     
@@ -218,11 +234,12 @@ def main(args):
     args.nrelation = nrelation
 
     # create tensorboard logger
-    tb_logger = tensorboard_logger.Logger(logdir=args.tb_path, flush_secs=2)
+    if args.do_train:
+        tb_logger = tensorboard_logger.Logger(logdir=args.tb_path, flush_secs=2)
     
     logging.info('Model: %s' % args.model)
     logging.info('Data Path: %s' % args.data_path)
-    logging.info('Exp name: %s' % args.save_path.split('/')[1])
+    # logging.info('Exp name: %s' % args.save_path.split('/')[1])
 
     logging.info(' ')
     logging.info('#entity: %d' % nentity)
@@ -234,10 +251,13 @@ def main(args):
     logging.info('#valid: %d' % len(valid_triples))
     test_triples = read_triple(os.path.join(args.data_path, 'test.txt'), entity2id, relation2id)
     logging.info('#test: %d' % len(test_triples))
-    
+
+    if args.do_test_relation_category:
+        test_triples = [triple + (rid2cid[triple[1]],) for triple in test_triples]
+
     #All true triples
     all_true_triples = train_triples + valid_triples + test_triples
-    
+
     kge_model = KGEModel(
         model_name=args.model,
         nentity=nentity,
@@ -281,20 +301,23 @@ def main(args):
             filter(lambda p: p.requires_grad, kge_model.parameters()), 
             lr=current_learning_rate
         )
-        if args.warm_up_steps:
-            warm_up_steps = args.warm_up_steps
-        else:
-            warm_up_steps = args.max_steps // 2
+        # if args.warm_up_steps:
+        #     warm_up_steps = args.warm_up_steps
+        # else:
+        #     warm_up_steps = args.max_steps // 2
 
     if args.init_checkpoint:
         # Restore model from checkpoint directory
         logging.info('Loading checkpoint %s...' % args.init_checkpoint)
-        checkpoint = torch.load(os.path.join(args.init_checkpoint, 'checkpoint'))
+        if args.checkpoint_name is None:
+            checkpoint = torch.load(os.path.join(args.init_checkpoint, 'checkpoint'))
+        else:
+            checkpoint = torch.load(os.path.join(args.init_checkpoint, 'checkpoint', args.checkpoint_name))
         init_step = checkpoint['step']
         kge_model.load_state_dict(checkpoint['model_state_dict'])
         if args.do_train:
             current_learning_rate = checkpoint['current_learning_rate']
-            warm_up_steps = checkpoint['warm_up_steps']
+            # warm_up_steps = checkpoint['warm_up_steps']
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     else:
         logging.info('Ramdomly Initializing %s Model...' % args.model)
@@ -315,7 +338,10 @@ def main(args):
     # Set valid dataloader as it would be evaluated during training
     
     if args.do_train:
-        logging.info('learning_rate = %d' % current_learning_rate)
+        logging.info('learning_rate = %f' % current_learning_rate)
+        logging.info('lr decay epoch = %s' % ('None' if args.lr_decay_epoch is None else str(args.lr_decay_epoch)))
+        logging.info('lr decay rate = %f' % args.lr_decay_rate)
+
         logging.info(' ')
 
         training_logs = []
@@ -327,23 +353,21 @@ def main(args):
             
             training_logs.append(log)
 
-            if step >= warm_up_steps:
-                current_learning_rate = current_learning_rate / 10.
+            if step == args.lr_decay_epoch:
+                current_learning_rate = current_learning_rate  * args.lr_decay_rate
                 logging.info('Change learning_rate to %f at step %d' % (current_learning_rate, step))
                 optimizer = torch.optim.Adam(
                     filter(lambda p: p.requires_grad, kge_model.parameters()),
                     lr=current_learning_rate
                 )
-                warm_up_steps = warm_up_steps * 3
 
             
-            if step % args.save_checkpoint_steps == 0:
+            if (step + 1) % args.save_checkpoint_steps == 0:
                 save_variable_list = {
                     'step': step, 
                     'current_learning_rate': current_learning_rate,
-                    'warm_up_steps': warm_up_steps
                 }
-                save_model(kge_model, optimizer, save_variable_list, args)
+                save_model(kge_model, optimizer, save_variable_list, args, step)
 
             if step % args.log_steps == 0:
                 metrics = {}
@@ -365,9 +389,8 @@ def main(args):
         save_variable_list = {
             'step': step, 
             'current_learning_rate': current_learning_rate,
-            'warm_up_steps': warm_up_steps
         }
-        save_model(kge_model, optimizer, save_variable_list, args)
+        save_model(kge_model, optimizer, save_variable_list, args, step)
         
     if args.do_valid:
         logging.info('Evaluating on Valid Dataset...')
@@ -376,7 +399,8 @@ def main(args):
     
     if args.do_test:
         logging.info('Evaluating on Test Dataset...')
-        metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args)
+        metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args,
+                                      relation_category=args.do_test_relation_category)
         log_metrics('Test', step, metrics)
     
     if args.evaluate_train:

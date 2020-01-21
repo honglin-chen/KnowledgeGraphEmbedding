@@ -121,6 +121,14 @@ class TrainDataset(Dataset):
 class TestDataset(Dataset):
     def __init__(self, triples, all_true_triples, nentity, nrelation, mode):
         self.len = len(triples)
+
+        temp = []
+        for triple in all_true_triples:
+            if len(triple) == 4:
+                triple = triple[0:3]
+            temp.append(triple)
+        all_true_triples = temp
+
         self.triple_set = set(all_true_triples)
         self.triples = triples
         self.nentity = nentity
@@ -131,7 +139,15 @@ class TestDataset(Dataset):
         return self.len
     
     def __getitem__(self, idx):
-        head, relation, tail = self.triples[idx]
+        positive_sample = self.triples[idx]
+
+        if len(positive_sample) == 3:
+            head, relation, tail = positive_sample
+            category = None
+        elif len(positive_sample) == 4:
+            head, relation, tail, category = positive_sample
+        else:
+            raise ValueError('The length of triple must be either 3 or 4')
 
         if self.mode == 'head-batch':
             tmp = [(0, rand_head) if (rand_head, relation, tail) not in self.triple_set
@@ -148,8 +164,11 @@ class TestDataset(Dataset):
         filter_bias = tmp[:, 0].float()
         negative_sample = tmp[:, 1]
 
-        positive_sample = torch.LongTensor((head, relation, tail))
-            
+        if len(positive_sample) == 3:
+            positive_sample = torch.LongTensor((head, relation, tail))
+        else:
+            positive_sample = torch.LongTensor((head, relation, tail, category))
+
         return positive_sample, negative_sample, filter_bias, self.mode
     
     @staticmethod
