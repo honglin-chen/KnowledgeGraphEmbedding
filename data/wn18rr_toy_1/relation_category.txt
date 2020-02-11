@@ -1,0 +1,2 @@
+_derivationally_related_form	1-1
+_member_of_domain_usage	1-M

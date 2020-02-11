@@ -1,0 +1,9 @@
+07075172	_member_of_domain_usage	10719395
+07075172	_member_of_domain_usage	01172598
+07075172	_member_of_domain_usage	00590241
+07075172	_member_of_domain_usage	00039318
+07075172	_member_of_domain_usage	05311054
+07075172	_member_of_domain_usage	00008007
+01332730	_derivationally_related_form	03122748
+06066555	_derivationally_related_form	00645415
+07193596	_derivationally_related_form	00784342

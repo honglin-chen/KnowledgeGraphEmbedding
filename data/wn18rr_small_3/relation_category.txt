@@ -1,0 +1,4 @@
+_hypernym	M-1
+_instance_hypernym	M-1
+_synset_domain_topic_of	M-1
+

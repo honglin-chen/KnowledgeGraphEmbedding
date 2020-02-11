@@ -12,14 +12,15 @@ import random
 
 import numpy as np
 import torch
-
+import pickle
 from torch.utils.data import DataLoader
 
 from model import KGEModel
 
 from dataloader import TrainDataset
-from dataloader import BidirectionalOneShotIterator
+from dataloader import BidirectionalOneShotIterator, UnidirectionalOneShotIterator
 import tensorboard_logger
+from utils.rsgd import RiemannianSGD
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
@@ -33,6 +34,9 @@ def parse_args(args=None):
     parser.add_argument('--do_valid', action='store_true')
     parser.add_argument('--do_test', action='store_true')
     parser.add_argument('-dtc', '--do_test_relation_category', action='store_true')
+    parser.add_argument('--train_with_relation_category', action='store_true')
+    parser.add_argument('--train_with_degree', action='store_true')
+
     parser.add_argument('--evaluate_train', action='store_true', help='Evaluate on training data')
     
     parser.add_argument('--countries', action='store_true', help='Use Countries S1/S2/S3 datasets')
@@ -53,7 +57,7 @@ def parse_args(args=None):
     parser.add_argument('-r', '--regularization', default=0.0, type=float)
     parser.add_argument('--test_batch_size', default=4, type=int, help='valid/test batch size')
     parser.add_argument('--uni_weight', action='store_true', 
-                        help='Otherwise use subsampling weighting like in word2vec')
+                         help='Otherwise use subsampling weighting like in word2vec')
     
     parser.add_argument('-lr', '--learning_rate', default=0.0001, type=float)
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
@@ -74,6 +78,11 @@ def parse_args(args=None):
     
     parser.add_argument('--nentity', type=int, default=0, help='DO NOT MANUALLY SET')
     parser.add_argument('--nrelation', type=int, default=0, help='DO NOT MANUALLY SET')
+
+    parser.add_argument('--tail_batch_only', action='store_true',
+                        help='use tail batch only for training')
+
+
     
     return parser.parse_args(args)
 
@@ -170,7 +179,68 @@ def log_metrics(mode, step, metrics):
 def log_tensorboard(logger, step, metrics, prefix):
     for metric in metrics:
         logger.log_value('{}/{}'.format(prefix, metric), metrics[metric], step)
-        
+
+
+from multiprocessing.pool import ThreadPool
+from functools import partial
+from tqdm import tqdm
+from sklearn.metrics import average_precision_score
+def reconstruction_worker(adj, model, objects, progress=False):
+    ranksum = nranks = ap_scores = iters = 0
+    lt = model.entity_embedding.data
+    labels = np.empty(lt.size(0))
+    for object in tqdm(objects) if progress else objects:
+        labels.fill(0)
+        neighbors = np.array(list(adj[object]))
+        dists = model.score_cones(lt[None, object], lt)
+        dists[object] = 1e12
+        sorted_dists, sorted_idx = dists.sort()
+        ranks, = np.where(np.in1d(sorted_idx.detach().cpu().numpy(), neighbors))
+        # The above gives us the position of the neighbors in sorted order.  We
+        # want to count the number of non-neighbors that occur before each neighbor
+        ranks += 1
+        N = ranks.shape[0]
+
+        # To account for other positive nearer neighbors, we subtract (N*(N+1)/2)
+        # As an example, assume the ranks of the neighbors are:
+        # 0, 1, 4, 5, 6, 8
+        # For each neighbor, we'd like to return the number of non-neighbors
+        # that ranked higher than it.  In this case, we'd return 0+0+2+2+2+3=14
+        # Another way of thinking about it is to return
+        # 0 + 1 + 4 + 5 + 6 + 8 - (0 + 1 + 2 + 3 + 4 + 5)
+        # (0 + 1 + 2 + ... + N) == (N * (N + 1) / 2)
+        # Note that we include `N` to account for the source embedding itself
+        # always being the nearest neighbor
+        ranksum += ranks.sum() - (N * (N - 1) / 2)
+        nranks += ranks.shape[0]
+        labels[neighbors] = 1
+        ap_scores += average_precision_score(labels, -dists.detach().cpu().numpy())
+        iters += 1
+    return float(ranksum), nranks, ap_scores, iters
+
+
+def eval_reconstruction(adj, model, workers=1, progress=False):
+    '''
+    Reconstruction evaluation.  For each object, rank its neighbors by distance
+
+    Args:
+        adj (dict[int, set[int]]): Adjacency list mapping objects to its neighbors
+        lt (torch.Tensor[N, dim]): Embedding table with `N` embeddings and `dim`
+            dimensionality
+        distfn ((torch.Tensor, torch.Tensor) -> torch.Tensor): distance function.
+        workers (int): number of workers to use
+    '''
+    objects = np.array(list(adj.keys()))
+    if workers > 1:
+        with ThreadPool(workers) as pool:
+            f = partial(reconstruction_worker, adj, model)
+            results = pool.map(f, np.array_split(objects, workers))
+            results = np.array(results).sum(axis=0).astype(float)
+    else:
+        results = reconstruction_worker(adj, model, objects, progress)
+    return float(results[0]) / results[1], float(results[2]) / results[3]
+
+
 def main(args):
     if (not args.do_train) and (not args.do_valid) and (not args.do_test) and not (args.do_test_relation_category):
         raise ValueError('one of train/val/test mode must be choosed.')
@@ -183,11 +253,11 @@ def main(args):
     if args.do_train and args.save_path is None:
         raise ValueError('Where do you want to save your trained model?')
 
-    # add save overwrite protection if FILE_ID > 0 (FILE_ID = -1 is used for debugging)
+    # add save overwrite protection if FILE_ID > 0 (FILE_ID = -n is used for debugging)
 
     if args.init_checkpoint is None and \
             args.save_path is not None and os.path.exists(args.save_path) and \
-            not (args.save_path.split('_')[-1] == '-1'):
+            not (args.save_path.split('_')[-1].startswith('-')):
         raise ValueError('Experiment folder already exist, exit to avoid content loss')
 
     if args.save_path and not os.path.exists(args.save_path):
@@ -208,7 +278,7 @@ def main(args):
             rid, relation = line.strip().split('\t')
             relation2id[relation] = int(rid)
 
-    if args.do_test_relation_category:
+    if args.do_test_relation_category or args.train_with_relation_category:
         rid2cid = dict()
         category2id = {'1-1': 0, '1-M': 1, 'M-1': 2, 'M-M': 3, 'None': -1}
 
@@ -253,7 +323,12 @@ def main(args):
     logging.info('#test: %d' % len(test_triples))
 
     if args.do_test_relation_category:
+        valid_triples = [triple + (rid2cid[triple[1]],) for triple in valid_triples]
         test_triples = [triple + (rid2cid[triple[1]],) for triple in test_triples]
+
+    if args.train_with_relation_category:
+        train_triples = [triple + (rid2cid[triple[1]],) for triple in train_triples]
+
 
     #All true triples
     all_true_triples = train_triples + valid_triples + test_triples
@@ -274,33 +349,48 @@ def main(args):
 
     if args.cuda:
         kge_model = kge_model.cuda()
+
+    if args.train_with_degree:
+        with open(os.path.join(args.data_path, 'degree.pkl'), 'rb') as handle:
+            degree = pickle.load(handle)
+    else:
+        degree = None
+
     
     if args.do_train:
         # Set training dataloader iterator
         train_dataloader_head = DataLoader(
-            TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch'), 
+            TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch', degree),
             batch_size=args.batch_size,
             shuffle=True, 
             num_workers=max(1, args.cpu_num//4),
             collate_fn=TrainDataset.collate_fn
         )
-        
+
         train_dataloader_tail = DataLoader(
-            TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch'), 
+            TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch', degree),
             batch_size=args.batch_size,
             shuffle=True, 
             num_workers=max(1, args.cpu_num//4),
             collate_fn=TrainDataset.collate_fn
         )
-        
-        train_iterator = BidirectionalOneShotIterator(train_dataloader_head, train_dataloader_tail)
+        if args.tail_batch_only:
+            print('!!! Warning: using tail batch only for training !!!')
+            train_iterator = UnidirectionalOneShotIterator(train_dataloader_tail)
+        else:
+            train_iterator = BidirectionalOneShotIterator(train_dataloader_head, train_dataloader_tail)
         
         # Set training configuration
         current_learning_rate = args.learning_rate
-        optimizer = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, kge_model.parameters()), 
-            lr=current_learning_rate
-        )
+
+        if args.model == 'RotatCones':
+            optimizer = RiemannianSGD(kge_model.optim_params(), lr=current_learning_rate)
+        else:
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, kge_model.parameters()),
+                lr=current_learning_rate
+            )
+        print(optimizer)
         # if args.warm_up_steps:
         #     warm_up_steps = args.warm_up_steps
         # else:
@@ -315,10 +405,24 @@ def main(args):
             checkpoint = torch.load(os.path.join(args.init_checkpoint, 'checkpoint', args.checkpoint_name))
         init_step = checkpoint['step']
         kge_model.load_state_dict(checkpoint['model_state_dict'])
+
         if args.do_train:
-            current_learning_rate = checkpoint['current_learning_rate']
+            # current_learning_rate = checkpoint['current_learning_rate']
             # warm_up_steps = checkpoint['warm_up_steps']
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+
+            if args.model == 'RotatCones':
+                logging.info('Change rsgd learning_rate to %f' % current_learning_rate)
+
+                optimizer = RiemannianSGD(kge_model.optim_params(), lr=current_learning_rate)
+            else:
+                logging.info('Change adam learning_rate to %f' % current_learning_rate)
+
+                optimizer = torch.optim.Adam(
+                    filter(lambda p: p.requires_grad, kge_model.parameters()),
+                    lr=current_learning_rate
+                )
     else:
         logging.info('Ramdomly Initializing %s Model...' % args.model)
         init_step = 0
@@ -347,20 +451,38 @@ def main(args):
         training_logs = []
         
         #Training Loop
+
+        # Construct adj # TODO: REMOVE
+        print('construction adj matrix for computing reconstruction error')
+        adj = {}
+        for triple in train_triples:
+            x = triple[0]
+            y = triple[2]
+            if x in adj:
+                adj[x].add(y)
+            else:
+                adj[x] = {y}
+
         for step in range(init_step, args.max_steps):
             
-            log = kge_model.train_step(kge_model, optimizer, train_iterator, args)
+            log = kge_model.train_step(kge_model, optimizer, train_iterator, args, step)
             
             training_logs.append(log)
 
             if step == args.lr_decay_epoch:
                 current_learning_rate = current_learning_rate  * args.lr_decay_rate
-                logging.info('Change learning_rate to %f at step %d' % (current_learning_rate, step))
-                optimizer = torch.optim.Adam(
-                    filter(lambda p: p.requires_grad, kge_model.parameters()),
-                    lr=current_learning_rate
-                )
 
+                if args.model == 'RotatCones':
+                    logging.info('Change rsgd learning_rate to %f at step %d' % (current_learning_rate, step))
+
+                    optimizer = RiemannianSGD(kge_model.optim_params(), lr=current_learning_rate)
+                else:
+                    logging.info('Change adam learning_rate to %f at step %d' % (current_learning_rate, step))
+
+                    optimizer = torch.optim.Adam(
+                        filter(lambda p: p.requires_grad, kge_model.parameters()),
+                        lr=current_learning_rate
+                    )
             
             if (step + 1) % args.save_checkpoint_steps == 0:
                 save_variable_list = {
@@ -379,11 +501,23 @@ def main(args):
             if step % args.tb_steps == 0:
                 log_tensorboard(tb_logger, step, metrics, 'train')
 
-            if args.do_valid and step % args.valid_steps == 0:
-                logging.info('Evaluating on Valid Dataset...')
-                metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
-                log_metrics('Valid', step, metrics)
-                log_tensorboard(tb_logger, step, metrics, 'valid')
+            if args.do_valid and (step + 1) % args.valid_steps == 0:
+                eval_mode = 'link-prediction'
+
+                if eval_mode == 'link-prediction':
+                    logging.info('Evaluating on Valid Dataset...')
+                    metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args,
+                                                  relation_category=args.do_test_relation_category, degree=degree)
+                    log_metrics('Valid', step, metrics)
+                    log_tensorboard(tb_logger, step, metrics, 'valid')
+                elif eval_mode == 'reconstruction':
+                    print('=> Computing Reconstruction Error')
+                    meanrank, maprank = eval_reconstruction(adj, kge_model, workers=4)
+                    print(meanrank, maprank)
+
+                else:
+                    raise ValueError
+
 
         
         save_variable_list = {
@@ -394,13 +528,14 @@ def main(args):
         
     if args.do_valid:
         logging.info('Evaluating on Valid Dataset...')
-        metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
+        metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args,
+                                      relation_category=args.do_test_relation_category, degree=degree)
         log_metrics('Valid', step, metrics)
     
     if args.do_test:
         logging.info('Evaluating on Test Dataset...')
         metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args,
-                                      relation_category=args.do_test_relation_category)
+                                      relation_category=args.do_test_relation_category, degree=degree)
         log_metrics('Test', step, metrics)
     
     if args.evaluate_train:
