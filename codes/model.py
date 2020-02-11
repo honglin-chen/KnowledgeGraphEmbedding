@@ -107,6 +107,12 @@ class KGEModel(nn.Module):
         # Initialize outside of the K ball, but inside the unit ball.
 
         if model_name in ['RotatCones', 'RotatCones2']:
+
+            # Note: small initialization is important for the model to work well:
+            # So far, the best parameters are:
+            # K = 0.1, EPS = 1e-3
+            # embedding_min = self.inner_radius + EPS
+            # embedding_max = self.inner_radius + 2 * EPS
             K = 0.1
             self.K = K
             self.EPS = 1e-3
@@ -137,7 +143,7 @@ class KGEModel(nn.Module):
                 self.entity_embedding.data = embedding
 
             print('K: %.5f, embedding_range: %.5f, embedding_min: %.5f, embedding_max: %.5f' % \
-                  (self.K, self.embedding_range, self.inner_radius + self.EPS, self.inner_radius + self.EPS * 2q))
+                  (self.K, self.embedding_range, self.inner_radius + self.EPS, self.inner_radius + self.EPS * 2))
 
 
 
@@ -1018,13 +1024,14 @@ class KGEModel(nn.Module):
                         if isinstance(score, tuple):
                             score_0 = score[0].squeeze(2)
                             score_1 = score[1].mean(dim=2)
+                            score_1 = - score_1
 
                             score_0 += filter_bias
-                            score_1 += (-100 * filter_bias)
-                            # score_1 += (100 * filter_bias)
+                            # score_1 += (-100 * filter_bias)
+                            score_1 += (100 * filter_bias)
 
                             argsort_0 = torch.argsort(score_0, dim = 1, descending=True)
-                            argsort_1 = torch.argsort(score_1, dim = 1, descending=False)
+                            argsort_1 = torch.argsort(score_1, dim = 1, descending=True)
 
                             one_one_mask = (category == 0).unsqueeze(1)
                             argsort = one_one_mask * argsort_0 + ~one_one_mask * argsort_1
