@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from model import KGEModel
 
-from dataloader import TrainDataset
+from dataloader import TrainDataset, TrainDatasetDualNegative
 from dataloader import BidirectionalOneShotIterator, UnidirectionalOneShotIterator
 import tensorboard_logger
 from utils.rsgd import RiemannianSGD
@@ -36,6 +36,8 @@ def parse_args(args=None):
     parser.add_argument('-dtc', '--do_test_relation_category', action='store_true')
     parser.add_argument('--train_with_relation_category', action='store_true')
     parser.add_argument('--train_with_degree', action='store_true')
+    parser.add_argument('--select_negative_samples', action='store_true')
+    parser.add_argument('--dual_negative_samples', action='store_true')
 
     parser.add_argument('--evaluate_train', action='store_true', help='Evaluate on training data')
     
@@ -280,7 +282,7 @@ def main(args):
 
     if args.do_test_relation_category or args.train_with_relation_category:
         rid2cid = dict()
-        category2id = {'1-1': 0, '1-M': 1, 'M-1': 2, 'M-M': 3, 'None': -1}
+        category2id = {'1-1': 0, '1-M': 1, 'M-1': 2, 'M-M': 3, 'dummy': -1}
 
         with open(os.path.join(args.data_path, 'relation_category.txt')) as fin:
             for line in fin:
@@ -302,6 +304,7 @@ def main(args):
     
     args.nentity = nentity
     args.nrelation = nrelation
+    args.relation2id = relation2id
 
     # create tensorboard logger
     if args.do_train:
@@ -330,8 +333,9 @@ def main(args):
         train_triples = [triple + (rid2cid[triple[1]],) for triple in train_triples]
 
 
-    #All true triples
+        #All true triples
     all_true_triples = train_triples + valid_triples + test_triples
+
 
     kge_model = KGEModel(
         model_name=args.model,
@@ -356,23 +360,35 @@ def main(args):
     else:
         degree = None
 
+    if args.select_negative_samples or args.dual_negative_samples:
+        # print('Load ', os.path.join(args.data_path, 'viable_neg.pkl'))
+        # with open(os.path.join(args.data_path, 'viable_neg.pkl'), 'rb') as handle:
+        #     viable_neg = pickle.load(handle)
+        # print('Done')
+        with open(os.path.join(args.data_path, 'descendants.json')) as json_file:
+            viable_neg = json.load(json_file)
+    else:
+        viable_neg = None
     
     if args.do_train:
         # Set training dataloader iterator
+
+        dataset_func = TrainDatasetDualNegative if args.dual_negative_samples else TrainDataset
+
         train_dataloader_head = DataLoader(
-            TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch', degree),
+            dataset_func(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch', degree, viable_neg),
             batch_size=args.batch_size,
-            shuffle=True, 
+            shuffle=True,
             num_workers=max(1, args.cpu_num//4),
-            collate_fn=TrainDataset.collate_fn
+            collate_fn=dataset_func.collate_fn
         )
 
         train_dataloader_tail = DataLoader(
-            TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch', degree),
+            dataset_func(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch', degree, viable_neg),
             batch_size=args.batch_size,
-            shuffle=True, 
+            shuffle=True,
             num_workers=max(1, args.cpu_num//4),
-            collate_fn=TrainDataset.collate_fn
+            collate_fn=dataset_func.collate_fn
         )
         if args.tail_batch_only:
             print('!!! Warning: using tail batch only for training !!!')
@@ -383,13 +399,10 @@ def main(args):
         # Set training configuration
         current_learning_rate = args.learning_rate
 
-        if args.model == 'RotatCones':
-            optimizer = RiemannianSGD(kge_model.optim_params(), lr=current_learning_rate)
-        else:
-            optimizer = torch.optim.Adam(
-                filter(lambda p: p.requires_grad, kge_model.parameters()),
-                lr=current_learning_rate
-            )
+        optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, kge_model.parameters()),
+            lr=current_learning_rate
+        )
         print(optimizer)
         # if args.warm_up_steps:
         #     warm_up_steps = args.warm_up_steps
@@ -411,18 +424,12 @@ def main(args):
             # warm_up_steps = checkpoint['warm_up_steps']
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
+            logging.info('Change adam learning_rate to %f' % current_learning_rate)
 
-            if args.model == 'RotatCones':
-                logging.info('Change rsgd learning_rate to %f' % current_learning_rate)
-
-                optimizer = RiemannianSGD(kge_model.optim_params(), lr=current_learning_rate)
-            else:
-                logging.info('Change adam learning_rate to %f' % current_learning_rate)
-
-                optimizer = torch.optim.Adam(
-                    filter(lambda p: p.requires_grad, kge_model.parameters()),
-                    lr=current_learning_rate
-                )
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, kge_model.parameters()),
+                lr=current_learning_rate
+            )
     else:
         logging.info('Ramdomly Initializing %s Model...' % args.model)
         init_step = 0
@@ -465,24 +472,18 @@ def main(args):
 
         for step in range(init_step, args.max_steps):
             
-            log = kge_model.train_step(kge_model, optimizer, train_iterator, args, step)
+            log = kge_model.train_step(kge_model, optimizer, train_iterator, args, step, viable_neg=viable_neg)
             
             training_logs.append(log)
 
             if step == args.lr_decay_epoch:
                 current_learning_rate = current_learning_rate  * args.lr_decay_rate
+                logging.info('Change adam learning_rate to %f at step %d' % (current_learning_rate, step))
 
-                if args.model == 'RotatCones':
-                    logging.info('Change rsgd learning_rate to %f at step %d' % (current_learning_rate, step))
-
-                    optimizer = RiemannianSGD(kge_model.optim_params(), lr=current_learning_rate)
-                else:
-                    logging.info('Change adam learning_rate to %f at step %d' % (current_learning_rate, step))
-
-                    optimizer = torch.optim.Adam(
-                        filter(lambda p: p.requires_grad, kge_model.parameters()),
-                        lr=current_learning_rate
-                    )
+                optimizer = torch.optim.Adam(
+                    filter(lambda p: p.requires_grad, kge_model.parameters()),
+                    lr=current_learning_rate
+                )
             
             if (step + 1) % args.save_checkpoint_steps == 0:
                 save_variable_list = {
@@ -518,6 +519,14 @@ def main(args):
                 else:
                     raise ValueError
 
+            if args.evaluate_train and (step + 0) % args.valid_steps == 0:
+                logging.info('Evaluating on Train Dataset...')
+                metrics = kge_model.test_step(kge_model, train_triples, all_true_triples, args,
+                                              relation_category=args.do_test_relation_category, degree=degree)
+                log_metrics('Train', step, metrics)
+                log_tensorboard(tb_logger, step, metrics, 'train')
+
+
 
         
         save_variable_list = {
@@ -540,7 +549,7 @@ def main(args):
     
     if args.evaluate_train:
         logging.info('Evaluating on Training Dataset...')
-        metrics = kge_model.test_step(kge_model, train_triples, all_true_triples, args)
+        metrics = kge_model.test_step(kge_model, train_triples, all_true_triples, args, relation_category=args.do_test_relation_category)
         log_metrics('Test', step, metrics)
         
 if __name__ == '__main__':

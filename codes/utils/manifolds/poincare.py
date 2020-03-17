@@ -27,10 +27,7 @@ class PoincareManifold(EuclideanManifold):
         eps = self.eps
         sqnu = u.pow(2).sum(dim=-1)
         sqnu.clamp_(min=0, max=1 - eps)
-        if th.isnan(th.asin((self.inner_radius * (1 - sqnu) / th.sqrt(sqnu)).clamp(min=-1 + eps, max=1 - eps))).any():
-            pdb.set_trace()
-        return th.asin((self.inner_radius * (1 - sqnu) / th.sqrt(sqnu))
-            .clamp(min=-1 + eps, max=1 - eps))
+        return th.asin((self.K * (1 - sqnu) / th.sqrt(sqnu)).clamp(min=-1 + eps, max=1 - eps))
 
     def angle_at_u(self, u, v):
         norm_u = u.norm(2, dim=-1)
@@ -39,22 +36,6 @@ class PoincareManifold(EuclideanManifold):
         edist = (u - v).norm(2, dim=-1)  # euclidean distance
         num = (dot_prod * (1 + norm_u ** 2) - norm_u ** 2 * (1 + norm_v ** 2))
         denom = (norm_u * edist * ((1 + norm_v**2 * norm_u**2 - 2 * dot_prod).clamp(min=self.eps).sqrt())) + self.eps
-
-        if ((1 + norm_v**2 * norm_u**2 - 2 * dot_prod) == 0).any():
-            print('!!!! Sqrt with input 0 !!! ')
-            pdb.set_trace()
-
-        if th.isnan((num / denom).clamp_(min=-1 + self.eps, max=1 - self.eps).acos()).any():
-            # pdb.set_trace()
-
-            # TODO: FIXME (hacky way of dealing with numerical instability)
-            mask = (norm_u > 0.99) | (norm_v > 0.99) | ((1 + norm_v**2 * norm_u**2 - 2 * dot_prod) < self.eps)
-            print('encounter nan with %d faults' % th.nonzero(mask).shape[0])
-            for i in range(th.nonzero(mask).shape[0]):
-                a, b, c = th.nonzero(mask)[i, :]
-                denom[a, b, c] = self.eps
-                num[a, b, c] = 0.
-
         return (num / denom).clamp_(min=-1 + self.eps, max=1 - self.eps).acos()
 
     def rgrad(self, p, d_p):

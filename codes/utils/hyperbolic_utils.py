@@ -91,8 +91,8 @@ def mobius_add(x, y, c, dim=-1):
     denom = 1 + 2 * c * xy + c ** 2 * x2 * y2
     if (denom == 0).any():
         print('encounter zero norm in mb')
-        import pdb
-        pdb.set_trace()
+        # import pdb
+        # pdb.set_trace()
     return num / denom.clamp_min(MIN_NORM)
 
 
